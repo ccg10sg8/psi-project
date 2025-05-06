@@ -2,9 +2,9 @@ from math import log2
 
 # sizes of databases of server and client
 # size of intersection should be less than size of client's database
-server_size = 2 ** 20
-client_size = 4000
-intersection_size = 3500
+server_size = 20
+client_size = 20
+intersection_size = 2
 
 # seeds used by both the Server and the Client for the Murmur hash functions
 hash_seeds = [123456789, 10111213141516, 17181920212223]

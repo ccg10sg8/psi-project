@@ -8,146 +8,149 @@ from cuckoo_hash import reconstruct_item, Cuckoo
 from auxiliary_functions import windowing
 from oprf import order_of_generator, client_prf_online_parallel
 
-oprf_client_key = 12345678910111213141516171819222222222222
+LOG_TO_FILE = True
 
-log_no_hashes = int(log2(number_of_hashes)) + 1
-base = 2 ** ell
-minibin_capacity = int(bin_capacity / alpha)
-logB_ell = int(log2(minibin_capacity) / ell) + 1 # <= 2 ** HE.depth
-dummy_msg_client = 2 ** (sigma_max - output_bits + log_no_hashes)
+def log(msg):
+    print(msg)
+    if LOG_TO_FILE:
+        with open("client_log.txt", "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
 
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.connect(('localhost', 4470))
+def main():
+    oprf_client_key = 12345678910111213141516171819222222222222
 
-# Setting the public and private contexts for the BFV Homorphic Encryption scheme
-private_context = ts.context(ts.SCHEME_TYPE.BFV, poly_modulus_degree=poly_modulus_degree, plain_modulus=plain_modulus)
-public_context = ts.context_from(private_context.serialize())
-public_context.make_context_public()
+    log_no_hashes = int(log2(number_of_hashes)) + 1
+    base = 2 ** ell
+    minibin_capacity = int(bin_capacity / alpha)
+    logB_ell = int(log2(minibin_capacity) / ell) + 1
+    dummy_msg_client = 2 ** (sigma_max - output_bits + log_no_hashes)
 
-# We prepare the partially OPRF processed database to be sent to the server
-pickle_off = open("client_preprocessed", "rb")
-encoded_client_set = pickle.load(pickle_off)
-encoded_client_set_serialized = pickle.dumps(encoded_client_set, protocol=None)
+    log("[CLIENT] Connecting to server...")
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(('localhost', 4471))
 
-L = len(encoded_client_set_serialized)
-sL = str(L) + ' ' * (10 - len(str(L)))
-client_to_server_communiation_oprf = L #in bytes
-# The length of the message is sent first
-client.sendall((sL).encode())
-client.sendall(encoded_client_set_serialized)
+    log("[CLIENT] Setting up HE context...")
+    private_context = ts.context(ts.SCHEME_TYPE.BFV, poly_modulus_degree=poly_modulus_degree, plain_modulus=plain_modulus)
+    public_context = ts.context_from(private_context.serialize())
+    public_context.make_context_public()
 
-L = client.recv(10).decode().strip()
-L = int(L, 10)
+    log("[CLIENT] Loading preprocessed client set...")
+    with open("client_preprocessed", "rb") as f:
+        encoded_client_set = pickle.load(f)
+    encoded_client_set_serialized = pickle.dumps(encoded_client_set, protocol=None)
 
-PRFed_encoded_client_set_serialized = b""
-while len(PRFed_encoded_client_set_serialized) < L:
-    data = client.recv(4096)
-    if not data: break
-    PRFed_encoded_client_set_serialized += data   
-PRFed_encoded_client_set = pickle.loads(PRFed_encoded_client_set_serialized)
-t0 = time()
-server_to_client_communication_oprf = len(PRFed_encoded_client_set_serialized)
+    L = len(encoded_client_set_serialized)
+    sL = str(L) + ' ' * (10 - len(str(L)))
+    client.sendall(sL.encode())
+    client.sendall(encoded_client_set_serialized)
+    log(f"[CLIENT] Sent {L} bytes of encoded client set")
 
-# We finalize the OPRF processing by applying the inverse of the secret key, oprf_client_key
-key_inverse = pow(oprf_client_key, -1, order_of_generator)
-PRFed_client_set = client_prf_online_parallel(key_inverse, PRFed_encoded_client_set)
-print(' * OPRF protocol done!')
+    L = client.recv(10).decode().strip()
+    L = int(L, 10)
+    log(f"[CLIENT] Expecting {L} bytes of PRFed data from server")
 
-# Each PRFed item from the client set is mapped to a Cuckoo hash table
-CH = Cuckoo(hash_seeds)
-for item in PRFed_client_set:
-    CH.insert(item)
+    PRFed_encoded_client_set_serialized = b""
+    while len(PRFed_encoded_client_set_serialized) < L:
+        data = client.recv(4096)
+        if not data:
+            break
+        PRFed_encoded_client_set_serialized += data
+    PRFed_encoded_client_set = pickle.loads(PRFed_encoded_client_set_serialized)
 
-# We padd the Cuckoo vector with dummy messages
-for i in range(CH.number_of_bins):
-    if (CH.data_structure[i] == None):
-        CH.data_structure[i] = dummy_msg_client
+    log("[CLIENT] Finalizing OPRF with inverse key")
+    t0 = time()
+    key_inverse = pow(oprf_client_key, -1, order_of_generator)
+    PRFed_client_set = client_prf_online_parallel(key_inverse, PRFed_encoded_client_set)
+    log("[CLIENT] OPRF protocol complete")
 
-# We apply the windowing procedure for each item from the Cuckoo structure
-windowed_items = []
-for item in CH.data_structure:
-    windowed_items.append(windowing(item, minibin_capacity, plain_modulus))
+    log("[CLIENT] Inserting into Cuckoo hashing structure")
+    CH = Cuckoo(hash_seeds)
+    for item in PRFed_client_set:
+        CH.insert(item)
+    for i in range(CH.number_of_bins):
+        if CH.data_structure[i] is None:
+            CH.data_structure[i] = dummy_msg_client
 
-plain_query = [None for k in range(len(windowed_items))]
-enc_query = [[None for j in range(logB_ell)] for i in range(1, base)]
+    log("[CLIENT] Applying windowing and encrypting query...")
+    windowed_items = [windowing(item, minibin_capacity, plain_modulus) for item in CH.data_structure]
 
-# We create the <<batched>> query to be sent to the server
-# By our choice of parameters, number of bins = poly modulus degree (m/N =1), so we get (base - 1) * logB_ell ciphertexts
-for j in range(logB_ell):
-    for i in range(base - 1):
-        if ((i + 1) * base ** j - 1 < minibin_capacity):
-            for k in range(len(windowed_items)):
-                plain_query[k] = windowed_items[k][i][j]
-            enc_query[i][j] = ts.bfv_vector(private_context, plain_query)
+    plain_query = [None for _ in range(len(windowed_items))]
+    enc_query = [[None for _ in range(logB_ell)] for _ in range(1, base)]
+    for j in range(logB_ell):
+        for i in range(base - 1):
+            if (i + 1) * base ** j - 1 < minibin_capacity:
+                for k in range(len(windowed_items)):
+                    plain_query[k] = windowed_items[k][i][j]
+                enc_query[i][j] = ts.bfv_vector(private_context, plain_query)
 
-enc_query_serialized = [[None for j in range(logB_ell)] for i in range(1, base)]
-for j in range(logB_ell):
-    for i in range(base - 1):
-        if ((i + 1) * base ** j - 1 < minibin_capacity):
-            enc_query_serialized[i][j] = enc_query[i][j].serialize()
+    enc_query_serialized = [[None for _ in range(logB_ell)] for _ in range(1, base)]
+    for j in range(logB_ell):
+        for i in range(base - 1):
+            if (i + 1) * base ** j - 1 < minibin_capacity:
+                enc_query_serialized[i][j] = enc_query[i][j].serialize()
 
-context_serialized = public_context.serialize()
-message_to_be_sent = [context_serialized, enc_query_serialized]
-message_to_be_sent_serialized = pickle.dumps(message_to_be_sent, protocol=None)
-t1 = time()
-L = len(message_to_be_sent_serialized)
-sL = str(L) + ' ' * (10 - len(str(L)))
-client_to_server_communiation_query = L 
-#the lenght of the message is sent first
-client.sendall((sL).encode())
-print(" * Sending the context and ciphertext to the server....")
-# Now we send the message to the server
-client.sendall(message_to_be_sent_serialized)
+    context_serialized = public_context.serialize()
+    message_to_be_sent = [context_serialized, enc_query_serialized]
+    message_to_be_sent_serialized = pickle.dumps(message_to_be_sent, protocol=None)
+    t1 = time()
 
-print(" * Waiting for the servers's answer...")
+    L = len(message_to_be_sent_serialized)
+    sL = str(L) + ' ' * (10 - len(str(L)))
+    client.sendall(sL.encode())
+    client.sendall(message_to_be_sent_serialized)
+    log("[CLIENT] Sent encrypted query and context to server")
 
-# The answer obtained from the server:
-L = client.recv(10).decode().strip()
-L = int(L, 10)
-answer = b""
-while len(answer) < L:
-    data = client.recv(4096)
-    if not data: break
-    answer += data
-t2 = time()
-server_to_client_query_response = len(answer) #bytes
-# Here is the vector of decryptions of the answer
-ciphertexts = pickle.loads(answer)
-decryptions = []
-for ct in ciphertexts:
-    decryptions.append(ts.bfv_vector_from(private_context, ct).decrypt())
+    log("[CLIENT] Waiting for server's response...")
+    L = client.recv(10).decode().strip()
+    L = int(L, 10)
+    answer = b""
+    while len(answer) < L:
+        data = client.recv(4096)
+        if not data:
+            break
+        answer += data
 
-recover_CH_structure = []
-for matrix in windowed_items:
-    recover_CH_structure.append(matrix[0][0])
+    t2 = time()
+    ciphertexts = pickle.loads(answer)
+    decryptions = [ts.bfv_vector_from(private_context, ct).decrypt() for ct in ciphertexts]
+    log("[CLIENT] Decryption complete. Recovering intersection...")
 
-count = [0] * alpha
+    recover_CH_structure = [matrix[0][0] for matrix in windowed_items]
+    count = [0] * alpha
 
-g = open('client_set', 'r')
-client_set_entries = g.readlines()
-g.close()
-client_intersection = []
-for j in range(alpha):
-    for i in range(poly_modulus_degree):
-        if decryptions[j][i] == 0:
-            count[j] = count[j] + 1
+    with open('client_set', 'r') as g:
+        client_set_entries = g.readlines()
+    client_intersection = []
 
-            # The index i is the location of the element in the intersection
-            # Here we recover this element from the Cuckoo hash structure
-            PRFed_common_element = reconstruct_item(recover_CH_structure[i], i, hash_seeds[recover_CH_structure[i] % (2 ** log_no_hashes)])
-            index = PRFed_client_set.index(PRFed_common_element)
-            client_intersection.append(int(client_set_entries[index][:-1]))
+    for j in range(alpha):
+        for i in range(poly_modulus_degree):
+            if decryptions[j][i] == 0:
+                count[j] += 1
+                PRFed_common_element = reconstruct_item(recover_CH_structure[i], i, hash_seeds[recover_CH_structure[i] % (2 ** log_no_hashes)])
+                index = PRFed_client_set.index(PRFed_common_element)
+                client_intersection.append(int(client_set_entries[index].strip()))
 
-h = open('intersection', 'r')
-real_intersection = [int(line[:-1]) for line in h]
-h.close()
-t3 = time()
-print('\n Intersection recovered correctly: {}'.format(set(client_intersection) == set(real_intersection)))
-print("Disconnecting...\n")
-print('  Client ONLINE computation time {:.2f}s'.format(t1 - t0 + t3 - t2))
-print('  Communication size:')
-print('    ~ Client --> Server:  {:.2f} MB'.format((client_to_server_communiation_oprf + client_to_server_communiation_query )/ 2 ** 20))
-print('    ~ Server --> Client:  {:.2f} MB'.format((server_to_client_communication_oprf + server_to_client_query_response )/ 2 ** 20))
-client.close()
+    with open('intersection', 'r') as h:
+        real_intersection = [int(line.strip()) for line in h]
+
+    t3 = time()
+    match = set(client_intersection) == set(real_intersection)
+    log(f"[CLIENT] ✅ Intersection recovered correctly: {match}")
+    log(f"[CLIENT] 🔢 Intersection size: {len(client_intersection)}")
+    log(f"[CLIENT] Contents: {sorted(client_intersection)}")
+
+    # Save result
+    with open('client_intersection_result.txt', 'w') as f:
+        for item in sorted(client_intersection):
+            f.write(f"{item}\n")
+
+    log("[CLIENT] ✔ Intersection written to client_intersection_result.txt")
+    log(f"[CLIENT] ⏱ Client ONLINE computation time: {t1 - t0 + t3 - t2:.2f}s")
+    log("[CLIENT] Disconnecting...")
+    client.close()
 
 
+if __name__ == '__main__':
+    from multiprocessing import freeze_support
+    freeze_support()
+    main()
