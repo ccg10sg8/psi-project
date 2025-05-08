@@ -135,8 +135,8 @@ def main():
 
     t3 = time()
     match = set(client_intersection) == set(real_intersection)
-    log(f"[CLIENT] ✅ Intersection recovered correctly: {match}")
-    log(f"[CLIENT] 🔢 Intersection size: {len(client_intersection)}")
+    log(f"[CLIENT] Intersection recovered correctly: {match}")
+    log(f"[CLIENT] Intersection size: {len(client_intersection)}")
     log(f"[CLIENT] Contents: {sorted(client_intersection)}")
 
     # Save result
@@ -144,8 +144,8 @@ def main():
         for item in sorted(client_intersection):
             f.write(f"{item}\n")
 
-    log("[CLIENT] ✔ Intersection written to client_intersection_result.txt")
-    log(f"[CLIENT] ⏱ Client ONLINE computation time: {t1 - t0 + t3 - t2:.2f}s")
+    log("[CLIENT] Intersection written to client_intersection_result.txt")
+    log(f"[CLIENT] Client ONLINE computation time: {t1 - t0 + t3 - t2:.2f}s")
     log("[CLIENT] Disconnecting...")
     client.close()
 
